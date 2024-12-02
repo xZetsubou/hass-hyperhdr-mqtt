@@ -70,11 +70,12 @@ def dumps_payload(payload):
 class HyperHDRManger:
     def __init__(self, hass: HomeAssistant, config: dict) -> None:
         self._hass = hass
-        self.loop = asyncio.get_running_loop()
+        self._loop = asyncio.get_running_loop()
         self._payload: dict = None
         self.instances: dict = {}
         self.instances_manager: dict[int, HyperHDRInstance] = {}
         self._client: mqtt.Client = None
+        self._lock = asyncio.Lock()
 
         # User config
         self._topic = config.get(CONF_TOPIC)
@@ -136,7 +137,10 @@ class HyperHDRManger:
             payload = [change_index(instance)] + msg
         else:
             payload = [change_index(instance), msg]
-        if self.connected:
+
+        async with self._lock:
+            if not self.is_connected:
+                return self.debug(f"publish fails {payload}, broker isn't connected.")
             self._payload = None
 
             # Change selected index.
@@ -149,11 +153,9 @@ class HyperHDRManger:
 
             # We will wait for any message for the next 3 seconds else we will return
             self.debug(f"Publishing: {dumps_payload(payload)}")
-            task = asyncio.create_task(publish_and_wait())
+            task = self._loop.create_task(publish_and_wait())
             if wait:
                 await asyncio.wait_for(task, 5)
-        else:
-            self.debug(f"Couldn't publish {payload} because broker isn't connected.")
 
     def subscribes(self) -> bool:
         if self.connected:
@@ -221,7 +223,7 @@ class HyperHDRInstance:
         instance=0,
         manager: HyperHDRManger = None,
     ) -> None:
-        self.loop = asyncio.get_running_loop()
+        self._loop = asyncio.get_running_loop()
 
         self.components = ComponentsStates({})
         self._cache_components: dict = {}
@@ -439,7 +441,7 @@ class HyperHDRInstance:
             while True:
                 try:
                     interval = STATES_UPDATE_INTERVAL
-                    asyncio.create_task(self.serverInfo(True))
+                    self._loop.create_task(self.serverInfo(True))
                     if self._wait_for_new_states:
                         interval = 0.45
                     await asyncio.sleep(interval)
@@ -448,7 +450,7 @@ class HyperHDRInstance:
                     break
 
         if self._states_updater_task is None:
-            self._states_updater_task = self.loop.create_task(
+            self._states_updater_task = self._loop.create_task(
                 start_loop(), name=f"hyperhdr_mqtt_{self.selected_instance}"
             )
 
