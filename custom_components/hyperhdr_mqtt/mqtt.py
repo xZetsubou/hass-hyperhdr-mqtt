@@ -10,17 +10,20 @@ from homeassistant.components.mqtt import (
     async_subscribe_connection_status,
     is_connected as mqtt_connected,
 )
+from homeassistant.core import HomeAssistant
 import asyncio
 import logging
 import json
 
-from homeassistant.components.mqtt import client
+import paho.mqtt.client as mqtt
 from homeassistant.const import (
     CONF_HOST,
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_PORT,
 )
+from homeassistant.setup import SetupPhases, async_pause_setup
+from homeassistant.helpers.importlib import async_import_module
 from .const import (
     Components,
     Data,
@@ -65,11 +68,13 @@ def dumps_payload(payload):
 
 
 class HyperHDRManger:
-    def __init__(self, config: dict) -> None:
+    def __init__(self, hass: HomeAssistant, config: dict) -> None:
+        self._hass = hass
         self.loop = asyncio.get_running_loop()
         self._payload: dict = None
         self.instances: dict = {}
         self.instances_manager: dict[int, HyperHDRInstance] = {}
+        self._client: mqtt.Client = None
 
         # User config
         self._topic = config.get(CONF_TOPIC)
@@ -89,33 +94,31 @@ class HyperHDRManger:
     async def async_connect(self):
         self.debug(f"Connecting to {self._host}:{self._port}")
 
-        _client = client.MqttClientSetup(
-            {
-                CONF_CLIENT_ID: f"HA-{self._topic}",
-                CONF_TOPIC: self._topic,
-                CONF_BROKER: self._host,
-                CONF_PORT: self._port,
-                CONF_USERNAME: self._user,
-                CONF_PASSWORD: self._password,
-            }
-        ).client
-        if self._user and self._password:
-            _client.username_pw_set(username=self._user, password=str(self._password))
+        def setup_connection():
+            client = mqtt.Client(f"HA-{self._topic}")
+            if self._user and self._password:
+                client.username_pw_set(
+                    username=str(self._user), password=str(self._password)
+                )
 
-        _client.connect(self._host, self._port)
-        _client.loop()
-        _client.loop_start()
-        _client.on_message = self.onMessage
-        _client.on_connect = self.onConnect
-        _client.on_disconnect = self.onDisconnect
+            state = client.connect(self._host, self._port)
+            client.loop()
+            client.loop_start()
+            client.on_message = self.onMessage
+            client.on_connect = self.onConnect
+            client.on_disconnect = self.onDisconnect
 
-        self.client = _client
-        self.connected = _client.is_connected()
+            self.connected = client.is_connected()
+            self._client = client
+
+            return state
+
+        setup_connection()
+        if not self.connected:
+            raise ConnectionError(f"Could not connect to MQTT server.")
+
         self.subscribes()
         await self.serverInfo()
-
-        if not self.connected:
-            raise Exception("Couldn't connect.")
 
     async def serverInfo(self, instance=0) -> dict:
         async def getserverInfo():
@@ -128,10 +131,34 @@ class HyperHDRManger:
 
         await asyncio.wait_for(getserverInfo(), 10)
 
+    async def publish(self, instance, msg: dict, wait=False) -> bool:
+        if isinstance(msg, list):
+            payload = [change_index(instance)] + msg
+        else:
+            payload = [change_index(instance), msg]
+        if self.connected:
+            self._payload = None
+
+            # Change selected index.
+            async def publish_and_wait():
+                self._client.publish(self._topic_push, dumps_payload(payload))
+                while True:
+                    await asyncio.sleep(0.2)
+                    if self._payload is not None:
+                        break
+
+            # We will wait for any message for the next 3 seconds else we will return
+            self.debug(f"Publishing: {dumps_payload(payload)}")
+            task = asyncio.create_task(publish_and_wait())
+            if wait:
+                await asyncio.wait_for(task, 5)
+        else:
+            self.debug(f"Couldn't publish {payload} because broker isn't connected.")
+
     def subscribes(self) -> bool:
         if self.connected:
             topic = self._topic + "/" + JSON_API_RESPONSE
-            self.client.subscribe(topic)
+            self._client.subscribe(topic)
             self.debug(f"Subscribed to {topic} successfully")
             return True
 
@@ -176,38 +203,14 @@ class HyperHDRManger:
 
     def disconnect(self):
         self.debug(f"Disconnecting from {self._host}:{self._port} and clean subs")
-        self.client.unsubscribe(self._topic)
-        self.client.disconnect()
-        self.client.loop_stop()
+        self._client.unsubscribe(self._topic)
+        self._client.disconnect()
+        self._client.loop_stop()
         self.connected = None
-
-    async def publish(self, instance, msg: dict, wait=False) -> bool:
-        if isinstance(msg, list):
-            payload = [change_index(instance)] + msg
-        else:
-            payload = [change_index(instance), msg]
-        if self.connected:
-            self._payload = None
-
-            # Change selected index.
-            async def publish_and_wait():
-                self.client.publish(self._topic_push, dumps_payload(payload))
-                while True:
-                    await asyncio.sleep(0.2)
-                    if self._payload is not None:
-                        break
-
-            # We will wait for any message for the next 3 seconds else we will return
-            self.debug(f"Publishing: {dumps_payload(payload)}")
-            task = asyncio.create_task(publish_and_wait())
-            if wait:
-                await asyncio.wait_for(task, 5)
-        else:
-            self.debug(f"Couldn't publish {payload} because broker isn't connected.")
 
     @property
     def is_connected(self) -> bool:
-        return self.client and self.client.is_connected()
+        return self._client and self._client.is_connected()
 
 
 class HyperHDRInstance:

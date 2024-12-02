@@ -62,7 +62,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
     if "/JsonAPI" in data[CONF_TOPIC]:
         raise ValueError("Topic without /JsonAPI")
 
-    client = HyperHDRManger(data)
+    client = HyperHDRManger(hass, data)
     await client.async_connect()
 
     if not client.connected:

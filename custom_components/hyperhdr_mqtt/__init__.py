@@ -11,7 +11,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
@@ -43,15 +43,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     instances_data: dict[int, HyperHDRInstance] = {}
 
-    manager = HyperHDRManger(entry.data)
-    await manager.async_connect()
-    if manager.connected:
-        instance = manager.instances
-        for i, v in instance.items():
-            instances_data[i] = HyperHDRInstance(entry.data, i, manager)
-        manager.instances_manager = instances_data
-    else:
-        raise CannotConnect("Cannot connect MQTT Broker")
+    manager = HyperHDRManger(hass, entry.data)
+    try:
+        await manager.async_connect()
+        if manager.connected:
+            instance = manager.instances
+            for i, v in instance.items():
+                instances_data[i] = HyperHDRInstance(entry.data, i, manager)
+            manager.instances_manager = instances_data
+    except ConnectionError as exec:
+        raise exec
 
     connect = [
         asyncio.create_task(device.instance_connect())
